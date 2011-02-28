@@ -367,7 +367,14 @@ struct lock_stat_data {
 	struct lock_class_stats stats;
 };
 
+enum lock_stat_format {
+	lock_stat_format_normal = 0,
+	lock_stat_format_python,
+	lock_stat_format_max = lock_stat_format_python,
+};
+
 struct lock_stat_seq {
+	enum lock_stat_format format;
 	struct lock_stat_data *iter_end;
 	struct lock_stat_data stats[MAX_LOCKDEP_KEYS];
 };
@@ -410,14 +417,24 @@ static void snprint_time(char *buf, size_t bufsiz, s64 nr)
 static void seq_time(struct seq_file *m, s64 time)
 {
 	char num[15];
+	enum lock_stat_format f =
+		((struct lock_stat_seq *)m->private)->format;
 
 	snprint_time(num, sizeof(num), time);
 	seq_printf(m, " %14s", num);
+	if (f == lock_stat_format_python)
+		seq_printf(m, ", ");
 }
 
 static void seq_lock_time(struct seq_file *m, struct lock_time *lt)
 {
+	enum lock_stat_format f =
+		((struct lock_stat_seq *)m->private)->format;
+
 	seq_printf(m, "%14lu", lt->nr);
+	if (f == lock_stat_format_python)
+		seq_printf(m, ", ");
+
 	seq_time(m, lt->min);
 	seq_time(m, lt->max);
 	seq_time(m, lt->total);
@@ -429,6 +446,8 @@ static void seq_stats(struct seq_file *m, struct lock_stat_data *data)
 	struct lock_class *class;
 	struct lock_class_stats *stats;
 	int i, namelen;
+	enum lock_stat_format f =
+		((struct lock_stat_seq *)m->private)->format;
 
 	class = data->class;
 	stats = &data->stats;
@@ -458,80 +477,177 @@ static void seq_stats(struct seq_file *m, struct lock_stat_data *data)
 		namelen += 2;
 	}
 
+	if (f == lock_stat_format_python) {
+		seq_printf(m, "{ 'name': '%s', ", name);
+		seq_printf(m, "'writer': ");
+	}
+
 	if (stats->write_holdtime.nr) {
-		if (stats->read_holdtime.nr)
-			seq_printf(m, "%38s-W:", name);
-		else
-			seq_printf(m, "%40s:", name);
+		if (f == lock_stat_format_python)
+			seq_printf(m, "[ ");
+
+		if (f == lock_stat_format_normal) {
+			if (stats->read_holdtime.nr)
+				seq_printf(m, "%38s-W:", name);
+			else
+				seq_printf(m, "%40s:", name);
+		}
 
 		seq_printf(m, "%14lu ", stats->bounces[bounce_contended_write]);
+		if (f == lock_stat_format_python)
+			seq_printf(m, ",");
 		seq_lock_time(m, &stats->write_waittime);
+
 		seq_printf(m, " %14lu ", stats->bounces[bounce_acquired_write]);
+		if (f == lock_stat_format_python)
+			seq_printf(m, ",");
 		seq_lock_time(m, &stats->write_holdtime);
-		seq_puts(m, "\n");
+		if (f == lock_stat_format_python)
+			seq_printf(m, "]");
+
+		if (f == lock_stat_format_normal)
+			seq_puts(m, "\n");
+	} else {
+		if (f == lock_stat_format_python)
+			seq_printf(m, "None");
 	}
+
+	if (f == lock_stat_format_python)
+		seq_printf(m, ", 'reader': ");
 
 	if (stats->read_holdtime.nr) {
-		seq_printf(m, "%38s-R:", name);
+		if (f == lock_stat_format_python)
+			seq_printf(m, "[ ");
+
+		if (f == lock_stat_format_normal)
+			seq_printf(m, "%38s-R:", name);
+
 		seq_printf(m, "%14lu ", stats->bounces[bounce_contended_read]);
+		if (f == lock_stat_format_python)
+			seq_printf(m, ",");
 		seq_lock_time(m, &stats->read_waittime);
+
 		seq_printf(m, " %14lu ", stats->bounces[bounce_acquired_read]);
+		if (f == lock_stat_format_python)
+			seq_printf(m, ",");
 		seq_lock_time(m, &stats->read_holdtime);
-		seq_puts(m, "\n");
+		if (f == lock_stat_format_python)
+			seq_printf(m, "]");
+
+		if (f == lock_stat_format_normal)
+			seq_puts(m, "\n");
+	} else {
+		if (f == lock_stat_format_python)
+			seq_printf(m, "None");
 	}
 
-	if (stats->read_waittime.nr + stats->write_waittime.nr == 0)
+	if (stats->read_waittime.nr + stats->write_waittime.nr == 0) {
+		if (f == lock_stat_format_python)
+			seq_printf(m, "}\n");
 		return;
+	}
 
 	if (stats->read_holdtime.nr)
 		namelen += 2;
 
+	if (f == lock_stat_format_python)
+		seq_printf(m, ", 'contention': [");
 	for (i = 0; i < LOCKSTAT_POINTS; i++) {
 		char ip[32];
 
 		if (class->contention_point[i] == 0)
 			break;
 
-		if (!i)
+		if (!i && f == lock_stat_format_normal)
 			seq_line(m, '-', 40-namelen, namelen);
 
-		snprintf(ip, sizeof(ip), "[<%p>]",
+		switch (f) {
+		case lock_stat_format_python:
+			seq_printf(m, "[%lu, 0x%p, '%pS'], ",
+				stats->contention_point[i],
+				(void *)class->contention_point[i],
 				(void *)class->contention_point[i]);
-		seq_printf(m, "%40s %14lu %29s %pS\n",
-			   name, stats->contention_point[i],
-			   ip, (void *)class->contention_point[i]);
+			break;
+		default:
+			snprintf(ip, sizeof(ip), "[<%p>]",
+				(void *)class->contention_point[i]);
+			seq_printf(m, "%40s %14lu %29s %pS\n",
+				name, stats->contention_point[i],
+				ip, (void *)class->contention_point[i]);
+		break;
+		}
 	}
+
+	if (f == lock_stat_format_python)
+		seq_printf(m, "], 'contending': [");
+
 	for (i = 0; i < LOCKSTAT_POINTS; i++) {
 		char ip[32];
 
 		if (class->contending_point[i] == 0)
 			break;
 
-		if (!i)
+		if (!i && f == lock_stat_format_normal)
 			seq_line(m, '-', 40-namelen, namelen);
 
-		snprintf(ip, sizeof(ip), "[<%p>]",
+		switch (f) {
+		case lock_stat_format_python:
+			seq_printf(m, "[%lu, 0x%p, '%pS'], ",
+				stats->contention_point[i],
+				(void *)class->contending_point[i],
 				(void *)class->contending_point[i]);
-		seq_printf(m, "%40s %14lu %29s %pS\n",
-			   name, stats->contending_point[i],
-			   ip, (void *)class->contending_point[i]);
+		break;
+		default:
+			snprintf(ip, sizeof(ip), "[<%p>]",
+				(void *)class->contending_point[i]);
+			seq_printf(m, "%40s %14lu %29s %pS\n",
+				name, stats->contending_point[i],
+				ip, (void *)class->contending_point[i]);
+		break;
+		}
 	}
 	if (i) {
-		seq_puts(m, "\n");
-		seq_line(m, '.', 0, 40 + 1 + 10 * (14 + 1));
-		seq_puts(m, "\n");
+		if (f == lock_stat_format_normal) {
+			seq_puts(m, "\n");
+			seq_line(m, '.', 0, 40 + 1 + 10 * (14 + 1));
+			seq_puts(m, "\n");
+		}
 	}
+	if (f == lock_stat_format_python)
+		seq_printf(m, "] }\n");
 }
 
 static void seq_header(struct seq_file *m)
 {
-	seq_printf(m, "lock_stat version 0.3\n");
+	enum lock_stat_format format =
+		((struct lock_stat_seq *)m->private)->format;
 
-	if (unlikely(!debug_locks))
-		seq_printf(m, "*WARNING* lock debugging disabled!! - possibly due to a lockdep warning\n");
+	switch (format) {
+	case lock_stat_format_python:
+		seq_printf(m, "{ 'version': 0.3,");
+		break;
+	default:		/* normal */
+		seq_printf(m, "lock_stat version 0.3\n");
+		break;
+	}
 
-	seq_line(m, '-', 0, 40 + 1 + 10 * (14 + 1));
-	seq_printf(m, "%40s %14s %14s %14s %14s %14s %14s %14s %14s "
+	if (unlikely(!debug_locks)) {
+		const char *warning = "*WARNING* lock debugging disabled!!"
+			" - possibly due to a lockdep warning\n";
+
+		switch (format) {
+		case lock_stat_format_python:
+			seq_printf(m, "'warning': '%s',", warning);
+			break;
+		default:		/* normal */
+			seq_printf(m, "%s\n", warning);
+			break;
+		}
+	}
+
+	if (format == lock_stat_format_normal) {
+		seq_line(m, '-', 0, 40 + 1 + 10 * (14 + 1));
+		seq_printf(m, "%40s %14s %14s %14s %14s %14s %14s %14s %14s "
 			"%14s %14s\n",
 			"class name",
 			"con-bounces",
@@ -544,8 +660,17 @@ static void seq_header(struct seq_file *m)
 			"holdtime-min",
 			"holdtime-max",
 			"holdtime-total");
-	seq_line(m, '-', 0, 40 + 1 + 10 * (14 + 1));
-	seq_printf(m, "\n");
+		seq_line(m, '-', 0, 40 + 1 + 10 * (14 + 1));
+	}
+
+	switch (format) {
+	case lock_stat_format_python:
+		seq_printf(m, "}\n"); /* end of header dictionary */
+		break;
+	default:		/* normal */
+		seq_printf(m, "\n");
+		break;
+	}
 }
 
 static void *ls_start(struct seq_file *m, loff_t *pos)
@@ -599,6 +724,8 @@ static int lock_stat_open(struct inode *inode, struct file *file)
 	if (!data)
 		return -ENOMEM;
 
+	data->format = lock_stat_format_normal;
+
 	res = seq_open(file, &lockstat_ops);
 	if (!res) {
 		struct lock_stat_data *iter = data->stats;
@@ -649,12 +776,42 @@ static int lock_stat_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
+static long lock_stat_ioctl(struct file *file, unsigned int cmd,
+			unsigned long arg)
+{
+	struct lock_stat_seq *data =
+		((struct seq_file *)file->private_data)->private;
+	enum lock_stat_format new_format;
+
+	/*
+	 * currently, this ioctl doesn't provide any definition for cmd,
+	 * because main user of this ioctl is python script.
+	 */
+
+	if (cmd == 0) {
+		new_format = arg;
+		if (new_format < 0 || lock_stat_format_max < new_format) {
+			printk(KERN_INFO "lock_stat_ioctl():"
+				" invalid format: %d\n", new_format);
+			return -EINVAL;
+		}
+
+		data->format = arg;
+	} else {
+		printk(KERN_ERR "lock_stat_ioctl(): invalid cmd, %u\n", cmd);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static const struct file_operations proc_lock_stat_operations = {
 	.open		= lock_stat_open,
 	.write		= lock_stat_write,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= lock_stat_release,
+	.unlocked_ioctl	= lock_stat_ioctl,
 };
 #endif /* CONFIG_LOCK_STAT */
 
