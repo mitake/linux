@@ -40,6 +40,8 @@
  */
 #define KVM_PCI_MMIO_AREA		0x1000000
 
+struct spapr_phb;
+
 struct kvm {
 	int			sys_fd;		/* For system ioctls(), i.e. /dev/kvm */
 	int			vm_fd;		/* For VM ioctls() */
@@ -51,6 +53,9 @@ struct kvm {
 
 	u64			ram_size;
 	void			*ram_start;
+
+	u64			sdr1;
+	u32			pvr;
 
 	bool			nmi_disabled;
 
@@ -64,8 +69,20 @@ struct kvm {
 	unsigned long		fdt_gra;
 	unsigned long		initrd_gra;
 	unsigned long		initrd_size;
-	const char		*name;
+	char			*name;
 	int			vm_state;
+	struct icp_state	*icp;
+	struct spapr_phb	*phb;
 };
+
+/* Helper for the various bits of code that generate FDT nodes */
+#define _FDT(exp)							\
+	do {								\
+		int ret = (exp);					\
+		if (ret < 0) {						\
+			die("Error creating device tree: %s: %s\n",	\
+			    #exp, fdt_strerror(ret));			\
+		}							\
+	} while (0)
 
 #endif /* KVM__KVM_ARCH_H */

@@ -14,6 +14,10 @@
 #include "kvm/util.h"
 #include "kvm/kvm.h"
 
+#include "spapr.h"
+#include "spapr_pci.h"
+#include "xics.h"
+
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <signal.h>
@@ -21,6 +25,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <assert.h>
 
 static int debug_fd;
 
@@ -76,7 +81,8 @@ struct kvm_cpu *kvm_cpu__init(struct kvm *kvm, unsigned long cpu_id)
 	if (vcpu->kvm_run == MAP_FAILED)
 		die("unable to mmap vcpu fd");
 
-	ioctl(vcpu->vcpu_fd, KVM_ENABLE_CAP, &papr_cap);
+	if (ioctl(vcpu->vcpu_fd, KVM_ENABLE_CAP, &papr_cap) < 0)
+		die("unable to enable PAPR capability");
 
 	/*
 	 * We start all CPUs, directing non-primary threads into the kernel's
@@ -86,6 +92,9 @@ struct kvm_cpu *kvm_cpu__init(struct kvm *kvm, unsigned long cpu_id)
 	 * firmware a platform may be using.)
 	 */
 	vcpu->is_running = true;
+
+	/* Register with IRQ controller (FIXME, assumes XICS) */
+	xics_cpu_register(vcpu);
 
 	return vcpu;
 }
@@ -121,9 +130,27 @@ static void kvm_cpu__setup_regs(struct kvm_cpu *vcpu)
 static void kvm_cpu__setup_sregs(struct kvm_cpu *vcpu)
 {
 	/*
-	 * No sregs setup is required on PPC64/SPAPR (but there may be setup
-	 * required for non-paravirtualised platforms, e.g. TLB/SLB setup).
+	 * Some sregs setup to initialise SDR1/PVR/HIOR on PPC64 SPAPR
+	 * platforms using PR KVM.  (Technically, this is all ignored on
+	 * SPAPR HV KVM.)  Different setup is required for non-PV non-SPAPR
+	 * platforms!  (FIXME.)
 	 */
+	struct kvm_sregs sregs;
+	struct kvm_one_reg reg = {};
+
+	if (ioctl(vcpu->vcpu_fd, KVM_GET_SREGS, &sregs) < 0)
+		die("KVM_GET_SREGS failed");
+
+	sregs.u.s.sdr1 = vcpu->kvm->sdr1;
+	sregs.pvr = vcpu->kvm->pvr;
+
+	if (ioctl(vcpu->vcpu_fd, KVM_SET_SREGS, &sregs) < 0)
+		die("KVM_SET_SREGS failed");
+
+	reg.id = KVM_ONE_REG_PPC_HIOR;
+	reg.u.reg64 = 0;
+	if (ioctl(vcpu->vcpu_fd, KVM_SET_ONE_REG, &reg) < 0)
+		die("KVM_SET_ONE_REG failed");
 }
 
 /**
@@ -139,6 +166,13 @@ void kvm_cpu__reset_vcpu(struct kvm_cpu *vcpu)
 /* kvm_cpu__irq - set KVM's IRQ flag on this vcpu */
 void kvm_cpu__irq(struct kvm_cpu *vcpu, int pin, int level)
 {
+	unsigned int virq = level ? KVM_INTERRUPT_SET_LEVEL : KVM_INTERRUPT_UNSET;
+
+	/* FIXME: POWER-specific */
+	if (pin != POWER7_EXT_IRQ)
+		return;
+	if (ioctl(vcpu->vcpu_fd, KVM_INTERRUPT, &virq) < 0)
+		pr_warning("Could not KVM_INTERRUPT.");
 }
 
 void kvm_cpu__arch_nmi(struct kvm_cpu *cpu)
@@ -150,8 +184,32 @@ bool kvm_cpu__handle_exit(struct kvm_cpu *vcpu)
 	bool ret = true;
 	struct kvm_run *run = vcpu->kvm_run;
 	switch(run->exit_reason) {
+	case KVM_EXIT_PAPR_HCALL:
+		run->papr_hcall.ret = spapr_hypercall(vcpu, run->papr_hcall.nr,
+						      (target_ulong*)run->papr_hcall.args);
+		break;
 	default:
 		ret = false;
+	}
+	return ret;
+}
+
+bool kvm_cpu__emulate_mmio(struct kvm *kvm, u64 phys_addr, u8 *data, u32 len, u8 is_write)
+{
+	/*
+	 * FIXME: This function will need to be split in order to support
+	 * various PowerPC platforms/PHB types, etc.  It currently assumes SPAPR
+	 * PPC64 guest.
+	 */
+	bool ret = false;
+
+	if ((phys_addr >= SPAPR_PCI_WIN_START) &&
+	    (phys_addr < SPAPR_PCI_WIN_END)) {
+		ret = spapr_phb_mmio(kvm, phys_addr, data, len, is_write);
+	} else {
+		pr_warning("MMIO %s unknown address %llx (size %d)!\n",
+			   is_write ? "write to" : "read from",
+			   phys_addr, len);
 	}
 	return ret;
 }

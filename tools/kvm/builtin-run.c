@@ -997,6 +997,10 @@ static int kvm_cmd_run_init(int argc, const char **argv)
 	}
 
 	kvm = kvm__init(dev, hugetlbfs_path, ram_size, guest_name);
+	if (IS_ERR(kvm)) {
+		r = PTR_ERR(kvm);
+		goto fail;
+	}
 
 	kvm->single_step = single_step;
 
@@ -1111,11 +1115,9 @@ static int kvm_cmd_run_init(int argc, const char **argv)
 		die("unable to load kernel %s", kernel_filename);
 
 	kvm->vmlinux = vmlinux_filename;
-	r = symbol__init(kvm);
-	if (r < 0) {
-		pr_err("symbol__init() failed with error %d\n", r);
-		goto fail;
-	}
+	r = symbol_init(kvm);
+	if (r < 0)
+		pr_debug("symbol_init() failed with error %d\n", r);
 
 	ioport__setup_arch();
 
@@ -1270,9 +1272,9 @@ static void kvm_cmd_run_exit(int guest_ret)
 
 	compat__print_all_messages();
 
-	r = symbol__exit(kvm);
+	r = symbol_exit(kvm);
 	if (r < 0)
-		pr_warning("symbol__exit() failed with error %d\n", r);
+		pr_warning("symbol_exit() failed with error %d\n", r);
 
 	r = irq__exit(kvm);
 	if (r < 0)
@@ -1291,7 +1293,6 @@ static void kvm_cmd_run_exit(int guest_ret)
 	r = disk_image__close_all(kvm->disks, image_count);
 	if (r < 0)
 		pr_warning("disk_image__close_all() failed with error %d\n", r);
-	free(kvm_cpus);
 
 	r = serial8250__exit(kvm);
 	if (r < 0)
@@ -1320,6 +1321,8 @@ static void kvm_cmd_run_exit(int guest_ret)
 	r = kvm__exit(kvm);
 	if (r < 0)
 		pr_warning("pci__exit() failed with error %d\n", r);
+
+	free(kvm_cpus);
 
 	if (guest_ret == 0)
 		printf("\n  # KVM session ended normally.\n");
