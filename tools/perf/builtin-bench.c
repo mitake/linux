@@ -61,6 +61,16 @@ static struct bench_suite mem_suites[] = {
 	  NULL             }
 };
 
+static struct bench_suite futex_suites[] = {
+	{ "wait",
+	  "futex wait",
+	  bench_futex_wait },
+	suite_all,
+	{ NULL,
+	  NULL,
+	  NULL             }
+};
+
 struct bench_subsys {
 	const char *name;
 	const char *summary;
@@ -74,6 +84,9 @@ static struct bench_subsys subsystems[] = {
 	{ "mem",
 	  "memory access performance",
 	  mem_suites },
+	{ "futex",
+	  "futex performance",
+	  futex_suites },
 	{ "all",		/* sentinel: easy for help */
 	  "all benchmark subsystem",
 	  NULL },
